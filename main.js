@@ -1,146 +1,117 @@
+// main.js
 import './style.css';
+import { streamFromMultipleUrls, urls } from './fakeStreams.js';
+import { Signaler } from './signalling.js';
 
-import firebase from 'firebase/app';
-import 'firebase/firestore';
-
-const firebaseConfig = {
-  // your config
-};
-
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
-}
-const firestore = firebase.firestore();
-
-const servers = {
-  iceServers: [
-    {
-      urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
-    },
-  ],
+// --- Signaling setup ---
+const sig = new Signaler('ws://localhost:8080');
+const pc  = new RTCPeerConnection({
+  iceServers: [{ urls: ['stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302'] }],
   iceCandidatePoolSize: 10,
+});
+
+let dataChannel;
+let localStream;
+let remoteStream = new MediaStream();
+
+// UI elements
+const webcamButton  = document.getElementById('webcamButton');
+const webcamVideo   = document.getElementById('webcamVideo');
+const callInput     = document.getElementById('callInput');
+const callButton    = document.getElementById('callButton');
+const answerButton  = document.getElementById('answerButton');
+const remoteVideo   = document.getElementById('remoteVideo');
+const hangupButton  = document.getElementById('hangupButton');
+const myIdDisplay    = document.getElementById('myIdDisplay');
+
+// Display own peer ID
+sig.on('welcome', (_, id) => {
+  myIdDisplay.textContent = id;
+});
+
+// Incoming signaling handlers
+sig.on('sdp-offer', async (from, offer) => {
+  console.log('📥 Offer from', from, offer);
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  sig.send(from, 'sdp-answer', answer);
+});
+
+sig.on('sdp-answer', async (_, answer) => {
+  console.log('📥 Answer', answer);
+  await pc.setRemoteDescription(new RTCSessionDescription(answer));
+});
+
+sig.on('ice-candidate', async (_, candidate) => {
+  console.log('📥 ICE candidate', candidate);
+  await pc.addIceCandidate(new RTCIceCandidate(candidate));
+});
+
+// DataChannel handler
+pc.ondatachannel = ({ channel }) => {
+  dataChannel = channel;
+  dataChannel.onopen = () => console.log('🥳 DataChannel open!');
+  dataChannel.onmessage = e => console.log('💬 Data:', e.data);
 };
 
-// Global State
-const pc = new RTCPeerConnection(servers);
-let localStream = null;
-let remoteStream = null;
+// Track handler
+pc.ontrack = e => {
+  e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
+};
 
-// HTML elements
-const webcamButton = document.getElementById('webcamButton');
-const webcamVideo = document.getElementById('webcamVideo');
-const callButton = document.getElementById('callButton');
-const callInput = document.getElementById('callInput');
-const answerButton = document.getElementById('answerButton');
-const remoteVideo = document.getElementById('remoteVideo');
-const hangupButton = document.getElementById('hangupButton');
-
-// 1. Setup media sources
-
+// 1. Start webcam (or fake streams)
 webcamButton.onclick = async () => {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  remoteStream = new MediaStream();
-
-  // Push tracks from local stream to peer connection
-  localStream.getTracks().forEach((track) => {
-    pc.addTrack(track, localStream);
+  console.log("▶️ start webcam clicked");
+  const fakeStreams = await streamFromMultipleUrls(urls);
+  console.log("🔎 fakeStreams:", fakeStreams);
+  console.log("🔎 tracks in stream[0]:", fakeStreams[0].getTracks());
+  // swap real webcam for fake streams URLs
+  localStream = fakeStreams[0];
+  fakeStreams.forEach(stream => {
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
   });
-
-  // Pull tracks from remote stream, add to video stream
-  pc.ontrack = (event) => {
-    event.streams[0].getTracks().forEach((track) => {
-      remoteStream.addTrack(track);
-    });
-  };
-
   webcamVideo.srcObject = localStream;
   remoteVideo.srcObject = remoteStream;
-
-  callButton.disabled = false;
-  answerButton.disabled = false;
   webcamButton.disabled = true;
+  callButton.disabled   = false;
+  answerButton.disabled = false;
 };
 
-// 2. Create an offer
+// 2. Create offer (caller)
 callButton.onclick = async () => {
-  // Reference Firestore collections for signaling
-  const callDoc = firestore.collection('calls').doc();
-  const offerCandidates = callDoc.collection('offerCandidates');
-  const answerCandidates = callDoc.collection('answerCandidates');
+  const to = callInput.value.trim();
+  if (!to) return alert('Paste peer ID!');
 
-  callInput.value = callDoc.id;
+  // setup DataChannel BEFORE offer
+  dataChannel = pc.createDataChannel('chat');
+  dataChannel.onopen = () => console.log('🥳 Chat open');
+  dataChannel.onmessage = e => console.log('💬 Chat:', e.data);
 
-  // Get candidates for caller, save to db
-  pc.onicecandidate = (event) => {
-    event.candidate && offerCandidates.add(event.candidate.toJSON());
-  };
+  // gather ICE
+  pc.onicecandidate = e => e.candidate && sig.send(to, 'ice-candidate', e.candidate.toJSON());
 
-  // Create offer
-  const offerDescription = await pc.createOffer();
-  await pc.setLocalDescription(offerDescription);
-
-  const offer = {
-    sdp: offerDescription.sdp,
-    type: offerDescription.type,
-  };
-
-  await callDoc.set({ offer });
-
-  // Listen for remote answer
-  callDoc.onSnapshot((snapshot) => {
-    const data = snapshot.data();
-    if (!pc.currentRemoteDescription && data?.answer) {
-      const answerDescription = new RTCSessionDescription(data.answer);
-      pc.setRemoteDescription(answerDescription);
-    }
-  });
-
-  // When answered, add candidate to peer connection
-  answerCandidates.onSnapshot((snapshot) => {
-    snapshot.docChanges().forEach((change) => {
-      if (change.type === 'added') {
-        const candidate = new RTCIceCandidate(change.doc.data());
-        pc.addIceCandidate(candidate);
-      }
-    });
-  });
+  // create & send offer
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sig.send(to, 'sdp-offer', offer);
 
   hangupButton.disabled = false;
 };
 
-// 3. Answer the call with the unique ID
-answerButton.onclick = async () => {
-  const callId = callInput.value;
-  const callDoc = firestore.collection('calls').doc(callId);
-  const answerCandidates = callDoc.collection('answerCandidates');
-  const offerCandidates = callDoc.collection('offerCandidates');
+// 3. Answer (callee)
+answerButton.onclick = () => {
+  const to = callInput.value.trim();
+  if (!to) return alert('Paste peer ID!');
 
-  pc.onicecandidate = (event) => {
-    event.candidate && answerCandidates.add(event.candidate.toJSON());
-  };
+  pc.onicecandidate = e => e.candidate && sig.send(to, 'ice-candidate', e.candidate.toJSON());
+  // actual SDP-offer handling is above in sig.on('sdp-offer')
+  hangupButton.disabled = false;
+};
 
-  const callData = (await callDoc.get()).data();
-
-  const offerDescription = callData.offer;
-  await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
-
-  const answerDescription = await pc.createAnswer();
-  await pc.setLocalDescription(answerDescription);
-
-  const answer = {
-    type: answerDescription.type,
-    sdp: answerDescription.sdp,
-  };
-
-  await callDoc.update({ answer });
-
-  offerCandidates.onSnapshot((snapshot) => {
-    snapshot.docChanges().forEach((change) => {
-      console.log(change);
-      if (change.type === 'added') {
-        let data = change.doc.data();
-        pc.addIceCandidate(new RTCIceCandidate(data));
-      }
-    });
-  });
+// 4. Hangup
+hangupButton.onclick = () => {
+  pc.getSenders().forEach(s => s.track?.stop());
+  pc.close();
+  window.location.reload();
 };
