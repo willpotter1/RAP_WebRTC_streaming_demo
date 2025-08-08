@@ -9,7 +9,10 @@
  * @returns {Promise<MediaStream>} - Resolves to a MediaStream.
  */
 
-export const urls = ["/bunny.mp4"]
+export const urls = ["/bunny.mp4",
+                     "/sintel.mp4",
+                     "/elephant.mp4"
+                     ];
 
 export async function streamFromUrl(url, fps = 30, width = 640, height = 360) {
   return new Promise((resolve, reject) => {

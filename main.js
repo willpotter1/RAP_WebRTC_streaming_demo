@@ -3,6 +3,41 @@ import './style.css';
 import { streamFromMultipleUrls, urls } from './fakeStreams.js';
 import { Signaler } from './signalling.js';
 
+/**
+ * Load & play a fake‐video URL, capture its stream,
+ * then replace the outgoing video track in the PeerConnection.
+ */
+async function switchStream(index) {
+  const url = urls[index];
+  // 1) Create an offscreen video element
+  const video = document.createElement('video');
+  video.src = url;
+  video.loop = true;
+  video.muted = true;
+  await video.play();
+
+  // 2) Capture its MediaStream
+  const newStream = video.captureStream();
+  const newTrack  = newStream.getVideoTracks()[0];
+
+  // 3) Find your outgoing video sender and swap
+  const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+  if (sender) {
+    await sender.replaceTrack(newTrack);
+  } else {
+    pc.addTrack(newTrack, newStream);
+  }
+
+  // 4) Update your local preview
+  webcamVideo.srcObject = newStream;
+}
+
+// 3) Wire up your three buttons
+for (let i = 0; i < urls.length; i++) {
+  const btn = document.getElementById(`stream${i}`);
+  if (btn) btn.onclick = () => switchStream(i);
+}
+
 // --- Signaling setup ---
 const sig = new Signaler('ws://localhost:8080');
 const pc  = new RTCPeerConnection({
@@ -22,7 +57,7 @@ const callButton    = document.getElementById('callButton');
 const answerButton  = document.getElementById('answerButton');
 const remoteVideo   = document.getElementById('remoteVideo');
 const hangupButton  = document.getElementById('hangupButton');
-const myIdDisplay    = document.getElementById('myIdDisplay');
+const myIdDisplay   = document.getElementById('myIdDisplay');
 
 // Display own peer ID
 sig.on('welcome', (_, id) => {
@@ -67,7 +102,7 @@ webcamButton.onclick = async () => {
   console.log("🔎 fakeStreams:", fakeStreams);
   console.log("🔎 tracks in stream[0]:", fakeStreams[0].getTracks());
   // swap real webcam for fake streams URLs
-  localStream = fakeStreams[0];
+  localStream = fakeStreams[1];
   fakeStreams.forEach(stream => {
     stream.getTracks().forEach(track => pc.addTrack(track, stream));
   });
