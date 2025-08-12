@@ -3,150 +3,182 @@ import './style.css';
 import { streamFromMultipleUrls, urls } from './fakeStreams.js';
 import { Signaler } from './signalling.js';
 
-/**
- * Load & play a fake‐video URL, capture its stream,
- * then replace the outgoing video track in the PeerConnection.
- */
-async function switchStream(index) {
-  const url = urls[index];
-  // 1) Create an offscreen video element
-  const video = document.createElement('video');
-  video.src = url;
-  video.loop = true;
-  video.muted = true;
-  await video.play();
-
-  // 2) Capture its MediaStream
-  const newStream = video.captureStream();
-  const newTrack  = newStream.getVideoTracks()[0];
-
-  // 3) Find your outgoing video sender and swap
-  const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-  if (sender) {
-    await sender.replaceTrack(newTrack);
-  } else {
-    pc.addTrack(newTrack, newStream);
-  }
-
-  // 4) Update your local preview
-  webcamVideo.srcObject = newStream;
-}
-
-// 3) Wire up your three buttons
-for (let i = 0; i < urls.length; i++) {
-  const btn = document.getElementById(`stream${i}`);
-  if (btn) btn.onclick = () => switchStream(i);
-}
-
-// --- Signaling setup ---
-const sig = new Signaler('ws://localhost:8080');
-const pc  = new RTCPeerConnection({
-  iceServers: [{ urls: ['stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302'] }],
+// —————— Common Setup ——————
+const iceConfig = {
+  iceServers: [
+    { urls: ['stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302'] }
+  ],
   iceCandidatePoolSize: 10,
-});
+};
 
-let dataChannel;
-let localStream;
-let remoteStream = new MediaStream();
+const sig = new Signaler('ws://localhost:8080');
 
-// UI elements
-const webcamButton  = document.getElementById('webcamButton');
-const webcamVideo   = document.getElementById('webcamVideo');
-const callInput     = document.getElementById('callInput');
-const callButton    = document.getElementById('callButton');
-const answerButton  = document.getElementById('answerButton');
-const remoteVideo   = document.getElementById('remoteVideo');
-const hangupButton  = document.getElementById('hangupButton');
-const myIdDisplay   = document.getElementById('myIdDisplay');
+// —————— Shared State ——————
+let role = null;                      // "streamer" or "viewer"
+let localStreams = [];                // Array<MediaStream> for the 3 fake videos
+const remoteStream = new MediaStream();
 
-// Display own peer ID
+const pcs = {};                       // streamer: viewerId → RTCPeerConnection
+let viewerPc = null;                  // viewer’s RTCPeerConnection
+let dataChannel = null;               // viewer’s DataChannel
+
+// —————— Display Your Peer ID ——————
 sig.on('welcome', (_, id) => {
-  myIdDisplay.textContent = id;
+  document.getElementById('myIdDisplay').textContent = id;
 });
 
-// Incoming signaling handlers
-sig.on('sdp-offer', async (from, offer) => {
-  console.log('📥 Offer from', from, offer);
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  sig.send(from, 'sdp-answer', answer);
-});
+// —————— Role Initialization ——————
+document.getElementById('initButton').onclick = () => {
+  role = document.getElementById('roleSelect').value;
+  const sc = document.getElementById('streamerControls');
+  const vc = document.getElementById('viewerControls');
 
-sig.on('sdp-answer', async (_, answer) => {
-  console.log('📥 Answer', answer);
-  await pc.setRemoteDescription(new RTCSessionDescription(answer));
-});
-
-sig.on('ice-candidate', async (_, candidate) => {
-  console.log('📥 ICE candidate', candidate);
-  await pc.addIceCandidate(new RTCIceCandidate(candidate));
-});
-
-// DataChannel handler
-pc.ondatachannel = ({ channel }) => {
-  dataChannel = channel;
-  dataChannel.onopen = () => console.log('🥳 DataChannel open!');
-  dataChannel.onmessage = e => console.log('💬 Data:', e.data);
+  if (role === 'streamer') {
+    sc.style.display = 'block';
+    vc.style.display = 'none';
+    setupStreamer();
+  } else {
+    sc.style.display = 'none';
+    vc.style.display = 'block';
+    setupViewer();
+  }
 };
 
-// Track handler
-pc.ontrack = e => {
-  e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
-};
+// —————— STREAMER Flow ——————
+function setupStreamer() {
+  // 1) Load & preview all 3 streams
+  document.getElementById('startStream').onclick = async () => {
+    localStreams = await streamFromMultipleUrls(urls);
+    localStreams.forEach((stream, i) => {
+      const pv = document.getElementById(`preview${i}`);
+      if (pv) pv.srcObject = stream;
+    });
+  };
 
-// 1. Start webcam (or fake streams)
-webcamButton.onclick = async () => {
-  console.log("▶️ start webcam clicked");
-  const fakeStreams = await streamFromMultipleUrls(urls);
-  console.log("🔎 fakeStreams:", fakeStreams);
-  console.log("🔎 tracks in stream[0]:", fakeStreams[0].getTracks());
-  // swap real webcam for fake streams URLs
-  localStream = fakeStreams[1];
-  fakeStreams.forEach(stream => {
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+  // 2) Answer each viewer’s offer on its own PC
+  sig.on('sdp-offer', async (from, offer) => {
+    if (role !== 'streamer' || localStreams.length === 0) return;
+
+    // Create a new PC for this viewer if needed
+    if (!pcs[from]) {
+      const pc = new RTCPeerConnection(iceConfig);
+
+      // Start by sending stream 0
+      const track0 = localStreams[0].getVideoTracks()[0];
+      pc.addTrack(track0, localStreams[0]);
+
+      // Listen for “switch” commands over DataChannel
+      pc.ondatachannel = ({ channel }) => {
+        channel.onmessage = (ev) => {
+          const idx = parseInt(ev.data, 10);
+          if (idx >= 0 && idx < localStreams.length) {
+            const newTrack = localStreams[idx].getVideoTracks()[0];
+            const sender = pc.getSenders().find(s => s.track.kind === 'video');
+            sender.replaceTrack(newTrack);
+          }
+        };
+      };
+
+      // Send ICE back to that viewer
+      pc.onicecandidate = e => {
+        if (e.candidate) sig.send(from, 'ice-candidate', e.candidate.toJSON());
+      };
+
+      pcs[from] = pc;
+    }
+
+    // Complete the handshake
+    const pc = pcs[from];
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    sig.send(from, 'sdp-answer', answer);
   });
-  webcamVideo.srcObject = localStream;
+
+  // Route incoming ICE candidates to the correct PC
+  sig.on('ice-candidate', async (from, candidate) => {
+    if (role !== 'streamer') return;
+    const pc = pcs[from];
+    if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  });
+}
+
+// —————— VIEWER Flow ——————
+function setupViewer() {
+  // Bind remote stream to the <video>
+  const remoteVideo = document.getElementById('remoteVideo');
   remoteVideo.srcObject = remoteStream;
-  webcamButton.disabled = true;
-  callButton.disabled   = false;
-  answerButton.disabled = false;
-};
+  document.getElementById('streamSelect').disabled = true;
 
-// 2. Create offer (caller)
-callButton.onclick = async () => {
-  const to = callInput.value.trim();
-  if (!to) return alert('Paste peer ID!');
+  // Buffer ICE candidates that arrive too early
+  const pendingCandidates = [];
 
-  // setup DataChannel BEFORE offer
-  dataChannel = pc.createDataChannel('chat');
-  dataChannel.onopen = () => console.log('🥳 Chat open');
-  dataChannel.onmessage = e => console.log('💬 Chat:', e.data);
+  // Stream selection (sends index over DataChannel)
+  document.getElementById('streamSelect').onchange = e => {
+    if (dataChannel && dataChannel.readyState === 'open') {
+      dataChannel.send(e.target.value);
+    }
+  };
 
-  // gather ICE
-  pc.onicecandidate = e => e.candidate && sig.send(to, 'ice-candidate', e.candidate.toJSON());
+  // “Connect & Watch” click handler
+  document.getElementById('connectBtn').onclick = async () => {
+    const to = document.getElementById('streamerIdInput').value.trim();
+    if (!to) return alert('Please enter the Streamer ID');
 
-  // create & send offer
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  sig.send(to, 'sdp-offer', offer);
+    // 1) Create PeerConnection
+    viewerPc = new RTCPeerConnection(iceConfig);
 
-  hangupButton.disabled = false;
-};
+    // 2) Ask for recv-only video
+    viewerPc.addTransceiver('video', { direction: 'recvonly' });
 
-// 3. Answer (callee)
-answerButton.onclick = () => {
-  const to = callInput.value.trim();
-  if (!to) return alert('Paste peer ID!');
+    // 3) DataChannel for switch commands
+    dataChannel = viewerPc.createDataChannel('chat');
+    dataChannel.onopen = () => {
+      console.log('Chat open');
+      document.getElementById('streamSelect').disabled = false;
+    };
+    dataChannel.onmessage = e => console.log('Message from streamer:', e.data);
 
-  pc.onicecandidate = e => e.candidate && sig.send(to, 'ice-candidate', e.candidate.toJSON());
-  // actual SDP-offer handling is above in sig.on('sdp-offer')
-  hangupButton.disabled = false;
-};
+    // 4) Forward ICE to streamer
+    viewerPc.onicecandidate = e => {
+      if (e.candidate) {
+        sig.send(to, 'ice-candidate', e.candidate.toJSON());
+      }
+    };
 
-// 4. Hangup
-hangupButton.onclick = () => {
-  pc.getSenders().forEach(s => s.track?.stop());
-  pc.close();
-  window.location.reload();
-};
+    // 5) Handle incoming track
+    viewerPc.ontrack = e => {
+      // clear old video tracks
+      remoteStream.getVideoTracks().forEach(t => remoteStream.removeTrack(t));
+      remoteStream.addTrack(e.track);
+    };
+
+    // 6) Create & send offer
+    const offer = await viewerPc.createOffer();
+    await viewerPc.setLocalDescription(offer);
+    sig.send(to, 'sdp-offer', offer);
+  };
+
+  // 7) Handle answer, then flush ICE buffer
+  sig.on('sdp-answer', async (_, answer) => {
+    if (!viewerPc) return;
+    await viewerPc.setRemoteDescription(new RTCSessionDescription(answer));
+    for (const c of pendingCandidates) {
+      await viewerPc.addIceCandidate(new RTCIceCandidate(c));
+    }
+    pendingCandidates.length = 0;
+  });
+
+  // 8) Route ICE from streamer (buffer if needed)
+  sig.on('ice-candidate', async (_, candidate) => {
+    if (!viewerPc) return;
+    if (viewerPc.remoteDescription && viewerPc.remoteDescription.type) {
+      await viewerPc.addIceCandidate(new RTCIceCandidate(candidate));
+    } else {
+      pendingCandidates.push(candidate);
+    }
+  });
+}
+
+
+

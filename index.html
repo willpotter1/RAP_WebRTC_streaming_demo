@@ -1,49 +1,58 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebRTC Demo</title>
-  </head>
-  <body>
-    <h2>1. Start your Webcam</h2>
-    <p>Your peer ID: <strong id="myIdDisplay">connecting…</strong></p>
-    <div class="videos">
-      <span>
-        <h3>Local Stream</h3>
-        <video id="webcamVideo" autoplay playsinline></video>
-      </span>
-      <span>
-        <h3>Remote Stream</h3>
-        <video id="remoteVideo" autoplay playsinline></video>
-      </span>
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebRTC Demo</title>
+  <style>
+      .controls { margin: 1em 0; }
+      video { width: 320px; height: 240px; background: #000; }
+    </style>
+</head>
+<body>
+<h1>WebRTC Demo</h1>
 
+<div class="controls">
+  <label for="roleSelect">I am a:</label>
+  <select id="roleSelect">
+    <option value="streamer">Streamer</option>
+    <option value="viewer">Viewer</option>
+  </select>
+  <button id="initButton">Initialize</button>
+</div>
 
-    </div>
-    <span>
-      <div id="streamButtons" style="margin: 1em 0;">
-        <button id="stream0">Use Stream 1</button>
-        <button id="stream1">Use Stream 2</button>
-        <button id="stream2">Use Stream 3</button>
-      </div>
-    </span>
+<div id="streamerControls" style="display:none;">
+  <h2>Streamer</h2>
+  <button id="startStream">Start Streaming</button>
+  <video id="webcamVideo" autoplay muted playsinline></video>
+  <h3>Previews:</h3>
+  <video id="preview0" autoplay muted playsinline></video>
+  <video id="preview1" autoplay muted playsinline></video>
+  <video id="preview2" autoplay muted playsinline></video>
+</div>
 
-    <button id="webcamButton">Start webcam</button>
-    <h2>2. Create a new Call</h2>
-    <button id="callButton" disabled>Create Call (offer)</button>
+<div id="viewerControls" style="display:none;">
+  <h2>Viewer</h2>
+  <div class="controls">
+    <input id="streamerIdInput" placeholder="Enter streamer ID" />
+    <button id="connectBtn">Connect &amp; Watch</button>
+  </div>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <label for="streamSelect">Choose stream:</label>
+  <select id="streamSelect" disabled>
+    <option value="0">Stream 1</option>
+    <option value="1">Stream 2</option>
+    <option value="2">Stream 3</option>
+  </select>
+</div>
 
-    <h2>3. Join a Call</h2>
-    <p>Answer the call from a different browser window or device</p>
-    
-    <input id="callInput" />
-    <button id="answerButton" disabled>Answer</button>
+<div class="controls">
+  <strong>Your Peer ID:</strong>
+  <span id="myIdDisplay">connecting…</span>
+</div>
 
-    <h2>4. Hangup</h2>
-
-    <button id="hangupButton" disabled>Hangup</button>
-
-    <script type="module" src="./main.js"></script>
-
-  </body>
+<script type="module" src="./main.js"></script>
+</body>
 </html>
+
