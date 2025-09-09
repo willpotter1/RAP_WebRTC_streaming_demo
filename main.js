@@ -1,6 +1,6 @@
 // main.js
 import './style.css';
-import { streamFromMultipleUrls, urls } from './fakeStreams.js';
+import { streamFromMultipleUrls, urls, liveImageStreamFromFolder } from './fakeStreams.js';
 import { Signaler } from './signalling.js';
 
 // —————— Common Setup ——————
@@ -45,6 +45,7 @@ document.getElementById('initButton').onclick = () => {
 };
 
 // —————— STREAMER Flow ——————
+// —————— STREAMER Flow ——————
 function setupStreamer() {
   // 1) Load & preview all 3 streams
   document.getElementById('startStream').onclick = async () => {
@@ -53,33 +54,40 @@ function setupStreamer() {
       const pv = document.getElementById(`preview${i}`);
       if (pv) pv.srcObject = stream;
     });
+
+    // --- NEW: add the Live Images stream as index 3 (INSIDE the async handler) ---
+    const live = await liveImageStreamFromFolder({
+      fps: 12,            // adjust as you like
+      width: 1280,
+      height: 720,
+      loop: true,
+    });
+    window.liveImage = live;          // optional
+    localStreams.push(live.stream);   // becomes index 3
+
+    const p3 = document.getElementById('preview3');
+    if (p3) p3.srcObject = live.stream;
   };
 
   // 2) Answer each viewer’s offer on its own PC
   sig.on('sdp-offer', async (from, offer) => {
     if (role !== 'streamer' || localStreams.length === 0) return;
-
-    // Create a new PC for this viewer if needed
     if (!pcs[from]) {
       const pc = new RTCPeerConnection(iceConfig);
-
-      // Start by sending stream 0
       const track0 = localStreams[0].getVideoTracks()[0];
       pc.addTrack(track0, localStreams[0]);
 
-      // Listen for “switch” commands over DataChannel
       pc.ondatachannel = ({ channel }) => {
         channel.onmessage = (ev) => {
           const idx = parseInt(ev.data, 10);
           if (idx >= 0 && idx < localStreams.length) {
             const newTrack = localStreams[idx].getVideoTracks()[0];
-            const sender = pc.getSenders().find(s => s.track.kind === 'video');
-            sender.replaceTrack(newTrack);
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            sender?.replaceTrack(newTrack);
           }
         };
       };
 
-      // Send ICE back to that viewer
       pc.onicecandidate = e => {
         if (e.candidate) sig.send(from, 'ice-candidate', e.candidate.toJSON());
       };
@@ -87,7 +95,6 @@ function setupStreamer() {
       pcs[from] = pc;
     }
 
-    // Complete the handshake
     const pc = pcs[from];
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
@@ -95,13 +102,13 @@ function setupStreamer() {
     sig.send(from, 'sdp-answer', answer);
   });
 
-  // Route incoming ICE candidates to the correct PC
   sig.on('ice-candidate', async (from, candidate) => {
     if (role !== 'streamer') return;
     const pc = pcs[from];
     if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
   });
 }
+
 
 // —————— VIEWER Flow ——————
 function setupViewer() {
@@ -179,6 +186,3 @@ function setupViewer() {
     }
   });
 }
-
-
-
