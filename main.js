@@ -32,14 +32,17 @@ document.getElementById('initButton').onclick = () => {
   role = document.getElementById('roleSelect').value;
   const sc = document.getElementById('streamerControls');
   const vc = document.getElementById('viewerControls');
+  const peerIdSection = document.getElementById('peerIdSection');
 
   if (role === 'streamer') {
     sc.style.display = 'block';
     vc.style.display = 'none';
+    peerIdSection.hidden = false;
     setupStreamer();
   } else {
     sc.style.display = 'none';
     vc.style.display = 'block';
+    peerIdSection.hidden = true;
     setupViewer();
   }
 };

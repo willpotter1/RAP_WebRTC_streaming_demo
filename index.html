@@ -25,7 +25,6 @@
 <div id="streamerControls" style="display:none;">
   <h2>Streamer</h2>
   <button id="startStream">Start Streaming</button>
-  <video id="webcamVideo" autoplay muted playsinline></video>
   <h3>Previews:</h3>
   <video id="preview0" autoplay muted playsinline></video>
   <video id="preview1" autoplay muted playsinline></video>
@@ -49,7 +48,7 @@
   </select>
 </div>
 
-<div class="controls">
+<div class="controls" id="peerIdSection" hidden>
   <strong>Your Peer ID:</strong>
   <span id="myIdDisplay">connecting…</span>
 </div>
