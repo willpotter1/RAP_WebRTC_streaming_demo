@@ -11,7 +11,7 @@
 
 export const urls = ["/bunny.mp4", "/sintel.mp4", "/elephant.mp4"];
 
-export async function streamFromUrl(url, fps = 30, width = 640, height = 360) {
+export async function streamFromUrl(url, width = 640, height = 360) {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
     video.src = url;
@@ -23,33 +23,40 @@ export async function streamFromUrl(url, fps = 30, width = 640, height = 360) {
     video.width = width;
     video.height = height;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-
-    // Optional: keep the element for debugging
+    // keep it renderable (not display:none)
+    Object.assign(video.style, {
+      position: 'absolute',
+      left: '-99999px',
+      top: '-99999px',
+      width: `${width}px`,
+      height: `${height}px`,
+      opacity: '0'
+    });
     document.body.appendChild(video);
-    video.style.display = 'none';
 
-    video.addEventListener('loadeddata', () => {
-      video.play();
+    const onError = () => reject(new Error(`Error loading video from ${url}`));
+    video.addEventListener('error', onError, { once: true });
 
-      function draw() {
-        ctx.drawImage(video, 0, 0, width, height);
-        requestAnimationFrame(draw);
+    const start = async () => {
+      try {
+        await video.play();  // muted+autoplay should allow this without gesture
+        // capture directly from the video element
+        const stream = video.captureStream();
+        resolve(stream);
+      } catch (e) {
+        reject(e);
       }
-      draw();
+    };
 
-      const stream = canvas.captureStream(fps);
-      resolve(stream);
-    });
-
-    video.addEventListener('error', () => {
-      reject(new Error(`Error loading video from ${url}`));
-    });
+    if (video.readyState >= 2) {
+      // have current data
+      start();
+    } else {
+      video.addEventListener('loadeddata', () => start(), { once: true });
+    }
   });
 }
+
 
 /**
  * Converts multiple video URLs to separate MediaStreams.
@@ -108,8 +115,16 @@ export function makeLiveImageTrack({ fps = 30, width = 1280, height = 720 } = {}
         ctx.drawImage(lastBitmap, 0, 0, w, h);
         if (haveMSTG) {
           tsUs += framePeriodUs;
-          const vf = new VideoFrame(canvas, { timestamp: tsUs });
-          try { await writer.write(vf); } catch {}
+          // ✅ Add duration to improve timestamped frame continuity
+          // Use real wall-clock time (monotonic) to ensure continuous timestamps
+          const tsNowUs = Math.round(performance.now() * 1000);
+          const vf = new VideoFrame(canvas, { timestamp: tsNowUs, duration: framePeriodUs });
+
+          try {
+            await writer.write(vf);
+          } catch (err) {
+            console.warn('[makeLiveImageTrack] frame write failed:', err);
+          }
           vf.close();
         }
       }
@@ -143,6 +158,31 @@ export function makeLiveImageTrack({ fps = 30, width = 1280, height = 720 } = {}
     try { track.stop?.(); } catch {}
     if (lastBitmap) { lastBitmap.close(); lastBitmap = null; }
   }
+
+
+  // ✅ Heartbeat repaint loop to keep frames flowing on remote peer
+    if (!haveMSTG) {
+      // Only needed for Safari fallback; harmless otherwise
+      console.log('[makeLiveImageTrack] starting heartbeat repaint');
+    } else {
+      let lastPush = performance.now();
+      (async function heartbeat() {
+        while (running) {
+          const now = performance.now();
+          if (now - lastPush > framePeriodMs * 2) {
+            // simulate minimal frame update if viewer tab goes idle
+            const off = new OffscreenCanvas(1, 1);
+            const ctx2 = off.getContext('2d');
+            ctx2.fillRect(0, 0, 1, 1);
+            const vf = new VideoFrame(off, { timestamp: Math.round(performance.now() * 1000) });
+            try { await writer.write(vf); } catch {}
+            vf.close();
+            lastPush = now;
+          }
+          await sleep(framePeriodMs);
+        }
+      })();
+    }
 
   return { stream, push, stop };
 }
